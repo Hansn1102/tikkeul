@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>티끌 · 개인 재정 트래커</title>
+<meta name="description" content="수입과 지출을 기록하고 순수익, 예산, 목돈 목표를 한 화면에서 관리하는 개인 재정 트래커.">
+<meta name="theme-color" content="#F7F7F8" media="(prefers-color-scheme:light)">
+<meta name="theme-color" content="#08080A" media="(prefers-color-scheme:dark)">
+<link rel="icon" href="./icon-192.png">
+<link rel="apple-touch-icon" href="./icon-192.png">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.1/src/regular/style.css">
+<link rel="stylesheet" href="./style.css?v=5">
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="brand">
+      <span class="mk"><i class="ph ph-chart-line-up"></i></span>
+      <b>티끌</b><span>재정 트래커</span>
+    </div>
+    <div class="grp">기록</div>
+    <div class="nav">
+      <button data-tab="dash" aria-pressed="true"><i class="ph ph-squares-four"></i>대시보드<kbd>1</kbd></button>
+      <button data-tab="txns"><i class="ph ph-list-bullets"></i>거래 내역<kbd>2</kbd></button>
+      <button data-tab="stats"><i class="ph ph-chart-bar"></i>분석<kbd>3</kbd></button>
+    </div>
+    <div class="grp">계획</div>
+    <div class="nav">
+      <button data-tab="goals"><i class="ph ph-target"></i>목돈 목표<kbd>4</kbd></button>
+      <button data-tab="settings"><i class="ph ph-sliders-horizontal"></i>예산 · 설정<kbd>5</kbd></button>
+    </div>
+    <div class="foot">
+      단축키 <kbd>N</kbd> 새 거래 · <kbd>/</kbd> 검색<br>
+      모든 데이터는 이 브라우저에만 저장됩니다.
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="bar">
+      <h1 id="bar-title">대시보드</h1>
+      <span class="sub" id="bar-sub" style="font-size:12.5px;color:var(--faint)"></span>
+      <div class="spacer"></div>
+      <button class="btn line" data-act="import-quick" title="백업 불러오기"><i class="ph ph-upload-simple"></i></button>
+      <button class="btn primary" data-act="new"><i class="ph ph-plus"></i>새 거래</button>
+    </header>
+    <div class="content" id="view"></div>
+  </main>
+</div>
+<div id="modal-root"></div>
+<script src="./app.js?v=5"></script>
+</body>
+</html>
