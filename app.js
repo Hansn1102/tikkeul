@@ -244,6 +244,9 @@ function goalsMini(){
 function cashflowChart(months){
   const W=640,H=200,PL=46,PR=10,PT=14,PB=26;
   const d = months.map(k => { const s = stat(k); return { k, inc:s.income, exp:s.expense, net:s.net }; });
+  if(!d.some(x => x.inc || x.exp))
+    return `<div class="empty" style="padding:44px 20px"><i class="ph ph-chart-bar"></i>
+      <p>기록이 쌓이면 월별 수입과 지출이 여기에 그려집니다.</p></div>`;
   const max = Math.max(1, ...d.map(x => Math.max(x.inc, x.exp)));
   const iw = (W-PL-PR)/d.length, bw = Math.min(26, iw*0.32);
   const y = v => PT + (H-PT-PB) * (1 - v/max);
@@ -269,6 +272,9 @@ function dailyChart(k){
   const W=1200,H=210,PL=54,PR=12,PT=14,PB=26;
   const dim = daysInMonth(k), rows = inMonth(k).filter(t => t.type === 'expense');
   const daily = Array.from({length:dim}, (_,i) => sum(rows.filter(t => +t.date.slice(8) === i+1)));
+  if(!daily.some(v => v))
+    return `<div class="empty" style="padding:38px 20px"><i class="ph ph-calendar-blank"></i>
+      <p>이 달 지출 기록이 없습니다.</p></div>`;
   const max = Math.max(1, ...daily);
   const iw = (W-PL-PR)/dim, bw = Math.max(2, iw*0.62);
   const y = v => PT + (H-PT-PB)*(1 - v/max);
