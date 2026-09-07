@@ -46,7 +46,129 @@ function migrateV1(){
   try{ const d = JSON.parse(old); d.v = 2; localStorage.setItem(KEY, JSON.stringify(d)); return JSON.stringify(d); }
   catch(e){ return null; }
 }
-function save(){ try{ localStorage.setItem(KEY, JSON.stringify(S)); }catch(e){ toast('저장 공간이 부족합니다'); } }
+function save(){
+  try{ localStorage.setItem(KEY, JSON.stringify(S)); }
+  catch(e){ toast('저장 공간이 부족합니다'); }
+  takeSnapshot();
+  scheduleBackup();
+}
+
+/* ---------- 안전장치 1: 날짜별 스냅샷 (같은 브라우저 안에서 실수 복구용) ---------- */
+const SNAP = 'tikkeul.snap.';
+const SNAP_KEEP = 7;
+function takeSnapshot(){
+  if(!S.txns.length && !S.goals.length) return;
+  try{
+    localStorage.setItem(SNAP + today(), JSON.stringify(S));
+    const keys = Object.keys(localStorage).filter(k => k.startsWith(SNAP)).sort();
+    while(keys.length > SNAP_KEEP) localStorage.removeItem(keys.shift());
+  }catch(e){ /* 용량 부족이면 스냅샷은 건너뛴다 */ }
+}
+function snapshots(){
+  return Object.keys(localStorage).filter(k => k.startsWith(SNAP)).sort().reverse().map(k => {
+    let n = 0; try{ n = (JSON.parse(localStorage.getItem(k)).txns || []).length; }catch(e){}
+    return { key:k, date:k.slice(SNAP.length), count:n };
+  });
+}
+
+/* ---------- 안전장치 2: 로컬 파일 자동 백업 (File System Access) ---------- */
+const FS_OK = typeof window.showSaveFilePicker === 'function';
+const LAST_BK = 'tikkeul.lastBackup';
+let backupHandle = null, backupTimer = null, backupState = 'off'; // off | ready | denied
+let recoverOffer = null; // {source, count, apply()}
+
+function idb(){
+  return new Promise((res, rej) => {
+    const r = indexedDB.open('tikkeul-fs', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('kv');
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function idbGet(k){
+  try{
+    const db = await idb();
+    return await new Promise(res => { const q = db.transaction('kv').objectStore('kv').get(k); q.onsuccess = () => res(q.result); q.onerror = () => res(null); });
+  }catch(e){ return null; }
+}
+async function idbSet(k, v){
+  try{
+    const db = await idb();
+    await new Promise(res => { const q = db.transaction('kv','readwrite').objectStore('kv').put(v, k); q.onsuccess = () => res(); q.onerror = () => res(); });
+  }catch(e){}
+}
+
+async function connectBackupFile(){
+  if(!FS_OK) return toast('이 브라우저는 파일 자동 백업을 지원하지 않습니다');
+  try{
+    const h = await window.showSaveFilePicker({
+      suggestedName: 'tikkeul-backup.json',
+      types: [{ description: 'JSON 백업', accept: { 'application/json': ['.json'] } }],
+    });
+    backupHandle = h; backupState = 'ready';
+    await idbSet('backupHandle', h);
+    await writeBackup(true);
+    render(); toast('자동 백업을 연결했습니다');
+  }catch(e){ if(e.name !== 'AbortError') toast('백업 파일을 연결하지 못했습니다'); }
+}
+async function writeBackup(force){
+  if(!backupHandle) return;
+  try{
+    const perm = await backupHandle.queryPermission({ mode: 'readwrite' });
+    if(perm !== 'granted'){
+      if(!force){ backupState = 'denied'; return; }
+      const req = await backupHandle.requestPermission({ mode: 'readwrite' });
+      if(req !== 'granted'){ backupState = 'denied'; render(); return; }
+    }
+    const w = await backupHandle.createWritable();
+    await w.write(JSON.stringify(S, null, 1));
+    await w.close();
+    backupState = 'ready';
+    localStorage.setItem(LAST_BK, new Date().toISOString());
+  }catch(e){ backupState = 'denied'; }
+}
+function scheduleBackup(){
+  if(!backupHandle) return;
+  clearTimeout(backupTimer);
+  backupTimer = setTimeout(() => writeBackup(false), 1200);
+}
+async function readBackupFile(){
+  if(!backupHandle) return null;
+  try{
+    const perm = await backupHandle.queryPermission({ mode: 'readwrite' });
+    if(perm !== 'granted' && await backupHandle.requestPermission({ mode: 'readwrite' }) !== 'granted') return null;
+    const f = await backupHandle.getFile();
+    const d = JSON.parse(await f.text());
+    return Array.isArray(d.txns) ? d : null;
+  }catch(e){ return null; }
+}
+
+/* 데이터가 비었는데 백업·스냅샷에 기록이 있으면 복구를 제안한다 */
+async function checkRecovery(){
+  if(S.txns.length) return;
+  const snaps = snapshots().filter(x => x.count > 0);
+  if(snaps.length){
+    recoverOffer = { source: `${snaps[0].date} 스냅샷`, count: snaps[0].count,
+      apply: () => { S = JSON.parse(localStorage.getItem(snaps[0].key)); save(); } };
+    return render();
+  }
+  backupHandle = await idbGet('backupHandle');
+  if(!backupHandle) return;
+  const d = await readBackupFile();
+  if(d && d.txns.length){
+    recoverOffer = { source: '자동 백업 파일', count: d.txns.length,
+      apply: () => { S = Object.assign(blank(), d, { budget:Object.assign({monthly:0,fixed:[]}, d.budget), settings:Object.assign({startBalance:0}, d.settings) }); save(); } };
+    render();
+  }
+}
+async function initBackup(){
+  if(!FS_OK) return;
+  backupHandle = backupHandle || await idbGet('backupHandle');
+  if(!backupHandle) return;
+  const perm = await backupHandle.queryPermission({ mode: 'readwrite' });
+  backupState = perm === 'granted' ? 'ready' : 'denied';
+  render();
+}
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
 
 /* ---------- 날짜 · 금액 ---------- */
@@ -118,13 +240,34 @@ let statMonths = 6, rankMode = 'expense', statMonth = thisMonth();
 const view = document.getElementById('view');
 const TITLES = { dash:'대시보드', txns:'거래 내역', stats:'분석', goals:'목돈 목표', settings:'예산 · 설정' };
 
+function banner(){
+  if(recoverOffer) return `<div class="notice warn">
+    <i class="ph ph-lifebuoy"></i>
+    <div><b>${esc(recoverOffer.source)}에 거래 ${recoverOffer.count}건이 남아 있습니다.</b>
+      <span>지금 화면은 비어 있습니다. 복구하면 그 기록으로 되돌립니다.</span></div>
+    <button class="btn primary" data-act="recover">복구</button>
+    <button class="btn ghost" data-act="recover-dismiss">닫기</button>
+  </div>`;
+  if(backupState === 'denied') return `<div class="notice">
+    <i class="ph ph-warning-circle"></i>
+    <div><b>자동 백업 파일에 쓸 권한이 필요합니다.</b><span>허용해야 기록이 파일에도 저장됩니다.</span></div>
+    <button class="btn line" data-act="backup-permit">권한 허용</button>
+  </div>`;
+  if(FS_OK && !backupHandle && S.txns.length >= 5) return `<div class="notice">
+    <i class="ph ph-floppy-disk"></i>
+    <div><b>기록이 이 브라우저에만 있습니다.</b><span>백업 파일을 연결하면 저장할 때마다 자동으로 파일에 함께 남깁니다.</span></div>
+    <button class="btn line" data-act="backup-connect">백업 파일 연결</button>
+  </div>`;
+  return '';
+}
+
 function render(){
   document.querySelectorAll('.nav button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.tab === tab)));
   document.getElementById('bar-title').textContent = TITLES[tab];
   document.getElementById('bar-sub').textContent =
     tab === 'dash' ? monthFull(thisMonth()) + ' 기준' :
     tab === 'txns' ? `${S.txns.length}건 기록됨` : '';
-  view.innerHTML = ({ dash:vDash, txns:vTxns, stats:vStats, goals:vGoals, settings:vSettings })[tab]();
+  view.innerHTML = banner() + ({ dash:vDash, txns:vTxns, stats:vStats, goals:vGoals, settings:vSettings })[tab]();
 }
 
 /* ---------- 대시보드 ---------- */
@@ -509,6 +652,22 @@ function vSettings(){
         </div>
       </section>
       <section class="panel mt">
+        <div class="p-head"><h2>안전장치</h2><span class="sub">${FS_OK ? (backupHandle ? (backupState === 'ready' ? '자동 백업 켜짐' : '권한 필요') : '자동 백업 꺼짐') : '이 브라우저 미지원'}</span></div>
+        <div class="kv"><span>자동 백업 파일</span>
+          <span style="display:flex;gap:10px;align-items:center">
+            <b>${backupHandle ? esc(backupHandle.name || 'tikkeul-backup.json') : '연결 안 됨'}</b>
+            <button class="btn ghost" data-act="backup-connect">${backupHandle ? '변경' : '연결'}</button>
+          </span></div>
+        <div class="kv"><span>마지막 자동 백업</span><b>${lastBackupLabel()}</b></div>
+        ${snapshots().length ? snapshots().slice(0,3).map(x => `<div class="kv"><span>${x.date} 스냅샷</span>
+          <span style="display:flex;gap:10px;align-items:center"><b class="num">${x.count}건</b>
+          <button class="btn ghost" data-snap="${x.key}">되돌리기</button></span></div>`).join('')
+          : '<div class="kv" style="color:var(--faint);font-size:12.5px">저장할 때마다 하루 한 개씩 스냅샷을 남깁니다.</div>'}
+        <div style="padding:0 18px 16px;font-size:12px;color:var(--faint);line-height:1.65">
+          기록은 지금 보고 있는 주소(<b>${esc(location.host)}</b>)의 브라우저 저장소에만 남습니다. 다른 기기, 다른 브라우저, 시크릿 창은 저장소가 서로 분리돼 있어 기록이 보이지 않습니다. 파일 백업을 연결해 두면 브라우저 데이터가 지워져도 파일에서 되살릴 수 있습니다.
+        </div>
+      </section>
+      <section class="panel mt">
         <div class="p-head"><h2>단축키</h2></div>
         <div class="kv"><span>새 거래</span><kbd>N</kbd></div>
         <div class="kv"><span>검색</span><kbd>/</kbd></div>
@@ -517,6 +676,16 @@ function vSettings(){
       </section>
     </div>
   </div>`;
+}
+
+function lastBackupLabel(){
+  const t = localStorage.getItem(LAST_BK);
+  if(!t) return '없음';
+  const d = new Date(t), diff = (Date.now() - d.getTime())/60000;
+  if(diff < 1) return '방금';
+  if(diff < 60) return `${Math.round(diff)}분 전`;
+  if(diff < 1440) return `${Math.round(diff/60)}시간 전`;
+  return `${d.getFullYear()}. ${d.getMonth()+1}. ${d.getDate()}.`;
 }
 
 /* ---------- 모달 ---------- */
@@ -764,6 +933,13 @@ document.addEventListener('click', e => {
   if(t.dataset.edit) return modalTx(S.txns.find(x => x.id === t.dataset.edit));
   if(t.dataset.goalSave) return modalDeposit(t.dataset.goalSave);
   if(t.dataset.goalEdit) return modalGoal(S.goals.find(g => g.id === t.dataset.goalEdit));
+  if(t.dataset.snap){
+    if(confirm('이 스냅샷 시점으로 되돌립니다. 현재 기록은 덮어씌워집니다. 계속할까요?')){
+      try{ S = JSON.parse(localStorage.getItem(t.dataset.snap)); save(); render(); toast('되돌렸습니다'); }
+      catch(e){ toast('스냅샷을 읽지 못했습니다'); }
+    }
+    return;
+  }
   if(t.dataset.fixedDel){ S.budget.fixed = S.budget.fixed.filter(x => x.id !== t.dataset.fixedDel); save(); return render(); }
   if(t.dataset.del){
     const tx = S.txns.find(x => x.id === t.dataset.del);
@@ -772,6 +948,12 @@ document.addEventListener('click', e => {
   }
   switch(t.dataset.act){
     case 'new': return modalTx(null);
+    case 'backup-connect': return connectBackupFile();
+    case 'backup-permit': return writeBackup(true).then(render);
+    case 'recover':
+      if(recoverOffer){ recoverOffer.apply(); recoverOffer = null; render(); toast('복구했습니다'); }
+      return;
+    case 'recover-dismiss': recoverOffer = null; return render();
     case 'budget': return modalBudget();
     case 'start-bal': return modalStartBalance();
     case 'fixed-new': return modalFixed();
@@ -819,4 +1001,6 @@ document.addEventListener('keydown', e => {
 });
 
 render();
+initBackup();
+checkRecovery();
 if('serviceWorker' in navigator) addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(()=>{}));
