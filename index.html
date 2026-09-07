@@ -12,7 +12,7 @@
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@phosphor-icons/web@2.1.1/src/regular/style.css">
-<link rel="stylesheet" href="./style.css?v=7">
+<link rel="stylesheet" href="./style.css?v=8">
 </head>
 <body>
 <div class="app">
@@ -43,6 +43,7 @@
       <h1 id="bar-title">대시보드</h1>
       <span class="sub" id="bar-sub" style="font-size:12.5px;color:var(--faint)"></span>
       <div class="spacer"></div>
+      <button class="btn ghost sync-chip" id="sync-chip" data-act="sync-now" hidden></button>
       <button class="btn line" data-act="import-quick" title="백업 불러오기"><i class="ph ph-upload-simple"></i></button>
       <button class="btn primary" data-act="new"><i class="ph ph-plus"></i>새 거래</button>
     </header>
@@ -50,6 +51,6 @@
   </main>
 </div>
 <div id="modal-root"></div>
-<script src="./app.js?v=7"></script>
+<script src="./app.js?v=8"></script>
 </body>
 </html>

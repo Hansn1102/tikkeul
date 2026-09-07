@@ -27,7 +27,7 @@ const catOf = id => ALL_CATS.find(c => c.id === id) || EXP_CATS[EXP_CATS.length-
 const catsFor = type => type === 'income' ? INC_CATS : EXP_CATS;
 
 /* ---------- store ---------- */
-const blank = () => ({ v:2, txns:[], budget:{ monthly:0, fixed:[] }, goals:[], settings:{ startBalance:0 } });
+const blank = () => ({ v:2, txns:[], budget:{ monthly:0, fixed:[] }, goals:[], settings:{ startBalance:0 }, deleted:[], updatedAt:null });
 let S = load();
 function load(){
   try{
@@ -47,10 +47,20 @@ function migrateV1(){
   catch(e){ return null; }
 }
 function save(){
+  S.updatedAt = new Date().toISOString();
+  pruneTombstones();
   try{ localStorage.setItem(KEY, JSON.stringify(S)); }
   catch(e){ toast('저장 공간이 부족합니다'); }
   takeSnapshot();
   scheduleBackup();
+  scheduleSync();
+}
+/* 삭제한 거래는 id를 남겨 둬야 다른 기기에서 되살아나지 않는다 */
+function tombstone(id){ (S.deleted = S.deleted || []).push({ id, at: today() }); }
+function pruneTombstones(){
+  if(!S.deleted) return;
+  const limit = new Date(); limit.setDate(limit.getDate() - 120);
+  S.deleted = S.deleted.filter(x => new Date(x.at) >= limit);
 }
 
 /* ---------- 안전장치 1: 날짜별 스냅샷 (같은 브라우저 안에서 실수 복구용) ---------- */
@@ -652,6 +662,23 @@ function vSettings(){
         </div>
       </section>
       <section class="panel mt">
+        <div class="p-head"><h2>기기 간 동기화</h2><span class="sub">${syncCfg ? syncLabel() : '꺼짐'}</span></div>
+        <div class="kv"><span>상태</span>
+          <span style="display:flex;gap:10px;align-items:center">
+            <b>${syncCfg ? (syncState === 'error' ? '오류' : '연결됨') : '연결 안 됨'}</b>
+            <button class="btn ghost" data-act="sync-setup">${syncCfg ? '설정' : '연결'}</button>
+          </span></div>
+        ${syncCfg ? `<div class="kv"><span>서버</span><b style="font-size:12.5px;color:var(--muted)">${esc(syncCfg.url.replace(/^https?:\/\//,''))}</b></div>
+        <div class="kv"><span>마지막 동기화</span>
+          <span style="display:flex;gap:10px;align-items:center"><b>${syncLabel()}</b>
+          <button class="btn ghost" data-act="sync-now">지금 동기화</button></span></div>
+        ${syncErr ? `<div class="kv" style="color:var(--danger);font-size:12.5px">${esc(syncErr.slice(0,120))}</div>` : ''}` : ''}
+        <div style="padding:0 18px 16px;font-size:12px;color:var(--faint);line-height:1.65">
+          ${syncCfg ? '다른 기기에서는 설정 화면의 <b>설정 복사</b>로 얻은 한 줄을 붙여넣으면 바로 연결됩니다.'
+                    : 'Supabase 무료 프로젝트를 만들고 저장소의 <b>supabase.sql</b>을 SQL Editor에서 한 번 실행한 뒤, Project URL과 anon key를 넣으면 폰과 데스크톱이 같은 기록을 봅니다.'}
+        </div>
+      </section>
+      <section class="panel mt">
         <div class="p-head"><h2>안전장치</h2><span class="sub">${FS_OK ? (backupHandle ? (backupState === 'ready' ? '자동 백업 켜짐' : '권한 필요') : '자동 백업 꺼짐') : '이 브라우저 미지원'}</span></div>
         <div class="kv"><span>자동 백업 파일</span>
           <span style="display:flex;gap:10px;align-items:center">
@@ -687,6 +714,103 @@ function lastBackupLabel(){
   if(diff < 1440) return `${Math.round(diff/60)}시간 전`;
   return `${d.getFullYear()}. ${d.getMonth()+1}. ${d.getDate()}.`;
 }
+
+/* ---------- 안전장치 3: 기기 간 동기화 (Supabase RPC) ---------- */
+const SYNC_KEY = 'tikkeul.sync';
+let syncCfg = null, syncState = 'off', syncTimer = null, syncBusy = false, syncErr = '', syncLastAt = null;
+
+function loadSyncCfg(){ try{ return JSON.parse(localStorage.getItem(SYNC_KEY)); }catch(e){ return null; } }
+function saveSyncCfg(c){ syncCfg = c; localStorage.setItem(SYNC_KEY, JSON.stringify(c)); }
+const randomCode = () => Array.from(crypto.getRandomValues(new Uint8Array(24)), b => b.toString(16).padStart(2,'0')).join('');
+
+async function rpc(fn, body){
+  const base = syncCfg.url.replace(/\/+$/, '');
+  const r = await fetch(`${base}/rest/v1/rpc/${fn}`, {
+    method: 'POST',
+    headers: { apikey: syncCfg.key, Authorization: 'Bearer ' + syncCfg.key, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const text = await r.text();
+  if(!r.ok) throw new Error(`${r.status} ${text.slice(0,140)}`);
+  return text ? JSON.parse(text) : null;
+}
+
+/* 두 기기의 기록을 합친다. 거래·목표는 id 기준 합집합, 나머지는 더 최근 문서 기준 */
+function mergeDocs(local, remote){
+  const lu = local.updatedAt || '', ru = remote.updatedAt || '';
+  const newer = lu >= ru ? local : remote, older = newer === local ? remote : local;
+  const dead = new Set([...(local.deleted||[]), ...(remote.deleted||[])].map(x => x.id));
+  const byId = list => { const m = new Map(); (list||[]).forEach(x => m.set(x.id, x)); return m; };
+  const mergeList = (a, b) => { const m = byId(a); byId(b).forEach((v,k) => m.set(k,v)); return [...m.values()]; };
+  return {
+    v: 2,
+    txns: mergeList(older.txns, newer.txns).filter(t => !dead.has(t.id))
+            .sort((a,b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0),
+    goals: mergeList(older.goals, newer.goals),
+    budget: newer.budget || older.budget,
+    settings: newer.settings || older.settings,
+    deleted: [...new Map([...(local.deleted||[]), ...(remote.deleted||[])].map(x => [x.id, x])).values()],
+    updatedAt: newer.updatedAt,
+  };
+}
+
+async function syncNow(manual){
+  if(!syncCfg || !syncCfg.url || !syncCfg.key || !syncCfg.code || syncBusy) return;
+  syncBusy = true; syncState = 'syncing'; syncErr = ''; paintSyncChip();
+  try{
+    const remote = await rpc('get_doc', { p_code: syncCfg.code });
+    let next = S;
+    if(remote && Array.isArray(remote.txns)){
+      const merged = mergeDocs(S, remote);
+      const changed = JSON.stringify(merged.txns) !== JSON.stringify(S.txns)
+                   || JSON.stringify(merged.goals) !== JSON.stringify(S.goals)
+                   || JSON.stringify(merged.budget) !== JSON.stringify(S.budget)
+                   || JSON.stringify(merged.settings) !== JSON.stringify(S.settings);
+      if(changed){
+        S = Object.assign(blank(), merged);
+        S.updatedAt = new Date().toISOString();
+        localStorage.setItem(KEY, JSON.stringify(S));
+        takeSnapshot(); scheduleBackup();
+        next = S; render();
+        if(manual) toast('다른 기기의 기록을 합쳤습니다');
+      }
+    }
+    await rpc('put_doc', { p_code: syncCfg.code, p_data: next });
+    syncLastAt = new Date().toISOString();
+    localStorage.setItem('tikkeul.lastSync', syncLastAt);
+    syncState = 'ok';
+    if(manual) toast('동기화했습니다');
+  }catch(e){
+    syncState = 'error'; syncErr = e.message || String(e);
+    if(manual) toast('동기화 실패: ' + syncErr.slice(0,60));
+  }finally{ syncBusy = false; paintSyncChip(); }
+}
+function scheduleSync(){
+  if(!syncCfg) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => syncNow(false), 2500);
+}
+function syncLabel(){
+  if(!syncCfg) return '동기화 꺼짐';
+  if(syncState === 'syncing') return '동기화 중';
+  if(syncState === 'error') return '동기화 오류';
+  const t = syncLastAt || localStorage.getItem('tikkeul.lastSync');
+  if(!t) return '동기화 대기';
+  const m = (Date.now() - new Date(t).getTime())/60000;
+  return m < 1 ? '방금 동기화' : m < 60 ? `${Math.round(m)}분 전 동기화` : `${Math.round(m/60)}시간 전 동기화`;
+}
+function paintSyncChip(){
+  const el = document.getElementById('sync-chip');
+  if(!el) return;
+  el.hidden = !syncCfg;
+  el.className = 'btn ghost sync-chip ' + syncState;
+  el.innerHTML = `<i class="ph ${syncState === 'error' ? 'ph-warning-circle' : syncState === 'syncing' ? 'ph-arrows-clockwise' : 'ph-cloud-check'}"></i>${syncLabel()}`;
+  el.title = syncErr || syncLabel();
+}
+
+/* 설정 문자열: 다른 기기에 한 줄로 옮기기 */
+const packCfg = c => btoa(unescape(encodeURIComponent(JSON.stringify(c))));
+const unpackCfg = s => JSON.parse(decodeURIComponent(escape(atob(s.trim()))));
 
 /* ---------- 모달 ---------- */
 const modalRoot = document.getElementById('modal-root');
@@ -867,6 +991,71 @@ function modalDeposit(gid){
     });
 }
 
+function modalSync(){
+  const c = syncCfg || { url:'', key:'', code: randomCode() };
+  openModal('기기 간 동기화', `
+    <div class="field"><div class="hint" style="line-height:1.7">
+      Supabase 무료 프로젝트 하나면 폰과 데스크톱이 같은 기록을 봅니다.
+      프로젝트의 <b>Project URL</b>과 <b>anon public key</b>를 넣으세요.
+      (Supabase 대시보드 → Project Settings → API)
+    </div></div>
+    <div class="field"><label for="s-url">Project URL</label>
+      <input id="s-url" type="url" placeholder="https://xxxx.supabase.co" value="${esc(c.url)}" autocomplete="off"></div>
+    <div class="field"><label for="s-key">anon public key</label>
+      <input id="s-key" type="text" placeholder="eyJhbGciOi..." value="${esc(c.key)}" autocomplete="off"></div>
+    <div class="field"><label for="s-code">동기화 코드</label>
+      <input id="s-code" type="text" value="${esc(c.code)}" autocomplete="off">
+      <div class="hint">이 코드를 아는 기기끼리만 기록이 오갑니다. 남에게 공유하지 마세요.</div></div>
+    <div class="field"><label for="s-paste">다른 기기 설정 붙여넣기</label>
+      <input id="s-paste" type="text" placeholder="복사한 설정 문자열" autocomplete="off">
+      <div class="hint">위 세 칸을 채우는 대신, 다른 기기에서 복사한 한 줄을 넣어도 됩니다.</div></div>
+    <div class="foot">
+      ${syncCfg ? `<button class="btn line" id="s-copy"><i class="ph ph-copy"></i>설정 복사</button>` : `<button class="btn line" data-close>취소</button>`}
+      <button class="btn primary" id="submit">연결하고 동기화</button>
+    </div>
+    ${syncCfg ? `<button class="btn danger wide" id="s-off" style="margin-top:8px">동기화 끄기</button>` : ''}
+  `, root => {
+    setTimeout(() => root.querySelector('#s-url').focus(), 60);
+    root.querySelector('#s-paste').addEventListener('input', e => {
+      const v = e.target.value.trim(); if(!v) return;
+      try{
+        const d = unpackCfg(v);
+        if(d.url && d.key && d.code){
+          root.querySelector('#s-url').value = d.url;
+          root.querySelector('#s-key').value = d.key;
+          root.querySelector('#s-code').value = d.code;
+          e.target.value = ''; toast('설정을 채웠습니다');
+        }
+      }catch(err){ /* 아직 붙여넣는 중일 수 있다 */ }
+    });
+    root.querySelector('#s-copy')?.addEventListener('click', async () => {
+      try{ await navigator.clipboard.writeText(packCfg(syncCfg)); toast('설정 문자열을 복사했습니다'); }
+      catch(e){ toast('복사하지 못했습니다'); }
+    });
+    root.querySelector('#s-off')?.addEventListener('click', () => {
+      if(!confirm('이 기기에서 동기화를 끕니다. 기록은 그대로 남습니다. 계속할까요?')) return;
+      localStorage.removeItem(SYNC_KEY); syncCfg = null; syncState = 'off';
+      closeModal(); render(); paintSyncChip(); toast('동기화를 껐습니다');
+    });
+    root.querySelector('#submit').addEventListener('click', async () => {
+      const url = root.querySelector('#s-url').value.trim();
+      const key = root.querySelector('#s-key').value.trim();
+      const code = root.querySelector('#s-code').value.trim();
+      if(!url || !key || code.length < 24) return toast('URL, 키, 24자 이상 코드가 필요합니다');
+      const prev = syncCfg;
+      syncCfg = { url, key, code };
+      try{
+        await rpc('get_doc', { p_code: code });
+        saveSyncCfg(syncCfg);
+        closeModal(); await syncNow(true); render(); paintSyncChip();
+      }catch(e){
+        syncCfg = prev;
+        toast('연결 실패: ' + String(e.message || e).slice(0,70));
+      }
+    });
+  });
+}
+
 /* ---------- 데이터 입출력 ---------- */
 function download(name, content, mime){
   const blob = new Blob([content], { type: mime });
@@ -943,12 +1132,14 @@ document.addEventListener('click', e => {
   if(t.dataset.fixedDel){ S.budget.fixed = S.budget.fixed.filter(x => x.id !== t.dataset.fixedDel); save(); return render(); }
   if(t.dataset.del){
     const tx = S.txns.find(x => x.id === t.dataset.del);
-    if(tx && confirm(`${won(tx.amount)}원 기록을 삭제할까요?`)){ S.txns = S.txns.filter(x => x.id !== tx.id); save(); render(); }
+    if(tx && confirm(`${won(tx.amount)}원 기록을 삭제할까요?`)){ S.txns = S.txns.filter(x => x.id !== tx.id); tombstone(tx.id); save(); render(); }
     return;
   }
   switch(t.dataset.act){
     case 'new': return modalTx(null);
     case 'backup-connect': return connectBackupFile();
+    case 'sync-setup': return modalSync();
+    case 'sync-now': return syncNow(true);
     case 'backup-permit': return writeBackup(true).then(render);
     case 'recover':
       if(recoverOffer){ recoverOffer.apply(); recoverOffer = null; render(); toast('복구했습니다'); }
@@ -1000,7 +1191,17 @@ document.addEventListener('keydown', e => {
   if(map[e.key]){ tab = map[e.key]; render(); }
 });
 
+syncCfg = loadSyncCfg();
+syncLastAt = localStorage.getItem('tikkeul.lastSync');
 render();
+paintSyncChip();
 initBackup();
 checkRecovery();
+if(syncCfg) syncNow(false);
+let lastPull = Date.now();
+document.addEventListener('visibilitychange', () => {
+  if(document.visibilityState !== 'visible' || !syncCfg) return;
+  if(Date.now() - lastPull < 60000) return;
+  lastPull = Date.now(); syncNow(false);
+});
 if('serviceWorker' in navigator) addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(()=>{}));
