@@ -27,18 +27,32 @@ const catOf = id => ALL_CATS.find(c => c.id === id) || EXP_CATS[EXP_CATS.length-
 const catsFor = type => type === 'income' ? INC_CATS : EXP_CATS;
 
 /* ---------- store ---------- */
-const blank = () => ({ v:2, txns:[], budget:{ monthly:0, fixed:[] }, goals:[], settings:{ startBalance:0 }, deleted:[], updatedAt:null });
+const blank = () => ({ v:2, txns:[], budget:{ monthly:0, fixed:[] }, bills:[], goals:[], settings:{ startBalance:0 }, deleted:[], updatedAt:null });
 let S = load();
 function load(){
   try{
     const raw = localStorage.getItem(KEY) || migrateV1();
     if(!raw) return blank();
     const d = JSON.parse(raw);
-    return Object.assign(blank(), d, {
+    return migrateFixed(Object.assign(blank(), d, {
       budget: Object.assign({ monthly:0, fixed:[] }, d.budget),
       settings: Object.assign({ startBalance:0 }, d.settings),
-    });
+      bills: Array.isArray(d.bills) ? d.bills : [],
+    }));
   }catch(e){ return blank(); }
+}
+/* 예전 '고정비'에는 납부일이 없었다. 매달 1일에 나가는 고정지출로 옮긴다.
+   (이 함수는 load() 안에서 돌기 때문에 아래쪽 헬퍼를 쓸 수 없다) */
+function migrateFixed(s){
+  const n = new Date();
+  const km = n.getFullYear() + '-' + String(n.getMonth()+1).padStart(2,'0');
+  (s.budget.fixed || []).forEach(f => s.bills.push({
+    id: f.id || ('b' + Math.random().toString(36).slice(2,9)),
+    name: f.name, amount: f.amount, day: 1, cat: 'home', months: 0, start: km, paid: {},
+  }));
+  s.budget.fixed = [];
+  s.bills.forEach(b => { if(!b.paid) b.paid = {}; });
+  return s;
 }
 function migrateV1(){
   const old = localStorage.getItem('tikkeul.v1');
@@ -222,7 +236,60 @@ const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp
 /* ---------- 집계 ---------- */
 const inMonth = k => S.txns.filter(t => ym(t.date) === k);
 const sum = a => a.reduce((x,y) => x + y.amount, 0);
-const fixedTotal = () => S.budget.fixed.reduce((a,b) => a + b.amount, 0);
+
+/* ---------- 납부 예정: 고정지출 · 할부 ---------- */
+/* 납부일이 그 달에 없으면(31일 → 2월) 말일로 당긴다 */
+function billDue(b, k){ return `${k}-${pad(Math.min(Math.max(1, b.day || 1), daysInMonth(k)))}`; }
+/* 할부 회차(1부터). 고정지출이면 null */
+function billTerm(b, k){
+  if(!b.months) return null;
+  const [y1,m1] = (b.start || k).split('-').map(Number);
+  const [y2,m2] = k.split('-').map(Number);
+  return (y2 - y1) * 12 + (m2 - m1) + 1;
+}
+function billActive(b, k){
+  const n = billTerm(b, k);
+  if(n === null) return (b.start || k) <= k;
+  return n >= 1 && n <= b.months;
+}
+const billsFor = k => S.bills.filter(b => billActive(b, k))
+                            .sort((a,b) => (a.day||1) - (b.day||1) || a.name.localeCompare(b.name));
+const billPaid = (b, k) => !!(b.paid && b.paid[k]);
+const daysApart = (a, b) => Math.round((new Date(b) - new Date(a)) / 86400000);
+/* 납부일이 지나기 전까지는 '납부 예정' */
+function billStatus(b, k){
+  const due = billDue(b, k), now = thisMonth();
+  if(billPaid(b, k)) return { s:'paid', label:'납부 완료', due };
+  if(k > now) return { s:'due', label:'납부 예정', due };
+  if(k < now) return { s:'late', label:'미납', due };
+  const t = today();
+  if(due > t) return { s:'due', label:`납부 예정 · D-${daysApart(t, due)}`, due };
+  if(due === t) return { s:'today', label:'오늘 납부', due };
+  return { s:'late', label:`미납 · ${daysApart(due, t)}일 지남`, due };
+}
+const billTotal = k => billsFor(k).reduce((a,b) => a + b.amount, 0);
+const billsLeft = k => billsFor(k).filter(b => !billPaid(b, k));
+const fixedTotal = () => billTotal(thisMonth());
+
+/* 납부 완료 → 실제 지출 거래로 남긴다 */
+function payBill(id, k){
+  const b = S.bills.find(x => x.id === id);
+  if(!b || billPaid(b, k)) return;
+  const term = billTerm(b, k);
+  const tx = { id: uid(), date: billDue(b, k), amount: b.amount, type:'expense',
+    cat: b.cat || 'home', memo: b.name + (term ? ` ${term}/${b.months}회` : ''), goalId: null, billId: b.id };
+  S.txns.push(tx);
+  b.paid = b.paid || {}; b.paid[k] = tx.id;
+  save(); render(); toast(`${b.name} ${won(b.amount)}원 납부로 기록했습니다`);
+}
+function unpayBill(id, k){
+  const b = S.bills.find(x => x.id === id);
+  if(!b || !billPaid(b, k)) return;
+  const txid = b.paid[k];
+  S.txns = S.txns.filter(t => t.id !== txid); tombstone(txid);
+  delete b.paid[k];
+  save(); render(); toast('납부 기록을 취소했습니다');
+}
 
 function stat(k){
   const rows = inMonth(k);
@@ -248,7 +315,7 @@ let tab = 'dash';
 let filt = { month: thisMonth(), type:'all', cat:'all', q:'', limit:60 };
 let statMonths = 6, rankMode = 'expense', statMonth = thisMonth();
 const view = document.getElementById('view');
-const TITLES = { dash:'대시보드', txns:'거래 내역', stats:'분석', goals:'목돈 목표', settings:'예산 · 설정' };
+const TITLES = { dash:'대시보드', txns:'거래 내역', stats:'분석', bills:'납부 예정', goals:'목돈 목표', settings:'예산 · 설정' };
 
 function banner(){
   if(recoverOffer) return `<div class="notice warn">
@@ -276,8 +343,9 @@ function render(){
   document.getElementById('bar-title').textContent = TITLES[tab];
   document.getElementById('bar-sub').textContent =
     tab === 'dash' ? monthFull(thisMonth()) + ' 기준' :
-    tab === 'txns' ? `${S.txns.length}건 기록됨` : '';
-  view.innerHTML = banner() + ({ dash:vDash, txns:vTxns, stats:vStats, goals:vGoals, settings:vSettings })[tab]();
+    tab === 'txns' ? `${S.txns.length}건 기록됨` :
+    tab === 'bills' ? (S.bills.length ? `${monthName(thisMonth())} 납부 ${billsLeft(thisMonth()).length}건 남음` : '') : '';
+  view.innerHTML = banner() + ({ dash:vDash, txns:vTxns, stats:vStats, bills:vBills, goals:vGoals, settings:vSettings })[tab]();
 }
 
 /* ---------- 대시보드 ---------- */
@@ -353,6 +421,20 @@ function vDash(){
       : `<div class="empty" style="padding:28px"><i class="ph ph-chart-pie-slice"></i><p>이 달 지출 기록이 없습니다.</p></div>`}
   </section>`;
 
+  const billRows = billsFor(k);
+  const billPanel = billRows.length ? (() => {
+    const left = billsLeft(k), leftSum = left.reduce((a,b) => a + b.amount, 0);
+    const late = left.filter(b => billStatus(b, k).s === 'late').length;
+    return `<section class="panel">
+      <div class="p-head"><h2>${monthName(k)} 납부</h2>
+        <button class="btn ghost" data-tab-go="bills">전체 보기 <i class="ph ph-arrow-right"></i></button></div>
+      <div class="kv"><span>남은 납부</span><b class="num ${late?'neg':''}">${won(leftSum)}원 <span style="color:var(--faint);font-weight:500">(${left.length}건)</span></b></div>
+      ${late ? `<div class="kv"><span>미납</span><b class="num neg">${late}건</b></div>` : ''}
+      <div class="bills mini">${billRows.slice(0,4).map(b => billRow(b, k, true)).join('')}</div>
+      ${billRows.length > 4 ? `<div style="padding:0 18px 14px;font-size:12px;color:var(--faint)">외 ${billRows.length-4}건</div>` : ''}
+    </section>`;
+  })() : '';
+
   const recent = sortTx(S.txns).slice(0,8);
   const recentPanel = `<section class="panel">
     <div class="p-head"><h2>최근 거래</h2><button class="btn ghost" data-tab-go="txns">전체 보기 <i class="ph ph-arrow-right"></i></button></div>
@@ -363,7 +445,7 @@ function vDash(){
 
   return kpis
     + `<div class="grid g-2 mt">${flow}${budgetPanel}</div>`
-    + `<div class="grid g-2 mt">${recentPanel}<div class="stack">${S.goals.length ? goalsMini() : ''}${ranks}</div></div>`;
+    + `<div class="grid g-2 mt">${recentPanel}<div class="stack">${billPanel}${S.goals.length ? goalsMini() : ''}${ranks}</div></div>`;
 }
 
 function rankRow(c, amt, max, total){
@@ -590,6 +672,95 @@ function vStats(){
 }
 
 /* ---------- 목표 ---------- */
+/* ---------- 납부 예정 ---------- */
+function billRow(b, k, compact){
+  const st = billStatus(b, k), term = billTerm(b, k);
+  return `<div class="bill ${st.s}">
+    <span class="bday"><b class="num">${+st.due.slice(-2)}</b><i>일</i></span>
+    <div class="binfo">
+      <div class="bname">${esc(b.name)}${term ? `<span class="bterm">${term}/${b.months}회</span>` : ''}</div>
+      <div class="bmeta"><span class="btag ${st.s}">${st.label}</span><span>${catOf(b.cat || 'home').name}</span></div>
+    </div>
+    <b class="num bamt">${won(b.amount)}원</b>
+    ${compact ? '' : `<span class="bact">
+      ${billPaid(b, k)
+        ? `<button class="btn ghost" data-bill-unpay="${b.id}">취소</button>`
+        : `<button class="btn line" data-bill-pay="${b.id}">납부 완료</button>`}
+      <button data-bill-edit="${b.id}" title="수정" style="color:var(--faint);font-size:16px"><i class="ph ph-pencil-simple"></i></button>
+    </span>`}
+  </div>`;
+}
+
+function vBills(){
+  const k = thisMonth();
+  if(!S.bills.length){
+    return `<section class="panel"><div class="empty" style="padding:56px 20px">
+      <i class="ph ph-receipt"></i>
+      <p>월세·통신비·구독료 같은 고정지출과 할부금을 등록해 두면<br>
+         납부일이 지나기 전까지 <b>납부 예정</b>으로 띄우고, 지나면 미납으로 알려 줍니다.</p>
+      <button class="btn primary lg" data-act="bill-new"><i class="ph ph-plus"></i>납부 항목 추가</button>
+    </div></section>`;
+  }
+  const rows = billsFor(k);
+  const left = billsLeft(k);
+  const leftSum = left.reduce((a,b) => a + b.amount, 0);
+  const paidSum = billTotal(k) - leftSum;
+  const late = left.filter(b => billStatus(b, k).s === 'late');
+  const nd = new Date(); nd.setDate(1); nd.setMonth(nd.getMonth() + 1);
+  const nextK = monthKey(nd);
+  const plans = S.bills.filter(b => b.months && billActive(b, k));
+  const ended = S.bills.filter(b => b.months && !billActive(b, k) && billTerm(b, k) > b.months);
+
+  return `<div class="kpis k-3">
+      <div class="kpi"><div class="k"><i class="ph ph-calendar-check"></i>${monthName(k)} 납부 예정</div>
+        <div class="v num">${won(billTotal(k))}<small>원</small></div>
+        <div class="d">${rows.length}건 · 고정지출 ${rows.filter(b=>!b.months).length} · 할부 ${rows.filter(b=>b.months).length}</div></div>
+      <div class="kpi"><div class="k"><i class="ph ph-hourglass"></i>아직 안 낸 금액</div>
+        <div class="v num ${late.length?'neg':''}">${won(leftSum)}<small>원</small></div>
+        <div class="d">${left.length}건 남음${late.length ? ` · 미납 ${late.length}건` : ''}</div></div>
+      <div class="kpi"><div class="k"><i class="ph ph-check-circle"></i>이번 달 납부 완료</div>
+        <div class="v num pos">${won(paidSum)}<small>원</small></div>
+        <div class="d">다음 달 예정 ${won(billTotal(nextK))}원</div></div>
+    </div>
+    <div class="grid g-2 mt">
+      <section class="panel">
+        <div class="p-head"><h2>${monthName(k)} 납부 목록</h2>
+          <button class="btn ghost" data-act="bill-new"><i class="ph ph-plus"></i>추가</button></div>
+        <div class="bills">${rows.map(b => billRow(b, k, false)).join('')}</div>
+        <div style="padding:12px 18px;font-size:12px;color:var(--faint);line-height:1.6">
+          납부일이 지나기 전까지는 <b>납부 예정</b>, 지나도 처리하지 않으면 <b>미납</b>으로 표시됩니다.
+          <b>납부 완료</b>를 누르면 그 날짜의 지출 거래로 기록됩니다.
+        </div>
+      </section>
+      <div class="stack">
+        <section class="panel">
+          <div class="p-head"><h2>다음 달 예정</h2><span class="sub">${monthName(nextK)}</span></div>
+          ${billsFor(nextK).length ? `<div class="bills mini">${billsFor(nextK).map(b => billRow(b, nextK, true)).join('')}</div>`
+            : `<div class="empty" style="padding:26px"><p style="margin:0">다음 달에 예정된 납부가 없습니다.</p></div>`}
+        </section>
+        ${plans.length ? `<section class="panel">
+          <div class="p-head"><h2>할부 진행</h2><span class="sub">${plans.length}건</span></div>
+          ${plans.map(b => {
+            const n = billTerm(b, k), done = Math.min(Math.max(0, n - 1), b.months);
+            const rest = Math.max(0, b.months - done);
+            const pct = Math.round(done / b.months * 100);
+            return `<div class="kv"><span>${esc(b.name)}<br>
+                <span style="font-size:11.5px;color:var(--faint)">${rest ? `${rest}회 남음 · 잔액 ${won(rest*b.amount)}원` : '완납'}</span></span>
+              <span style="display:flex;gap:10px;align-items:center;min-width:120px;justify-content:flex-end">
+                <span class="pbar"><i style="width:${pct}%"></i></span>
+                <b class="num">${done}/${b.months}</b></span></div>`;
+          }).join('')}
+        </section>` : ''}
+        ${ended.length ? `<section class="panel">
+          <div class="p-head"><h2>끝난 할부</h2><span class="sub">${ended.length}건</span></div>
+          ${ended.map(b => `<div class="kv"><span>${esc(b.name)}</span>
+            <span style="display:flex;gap:10px;align-items:center"><b class="num">${won(b.amount * b.months)}원 완납</b>
+            <button data-bill-edit="${b.id}" style="color:var(--faint)" title="수정"><i class="ph ph-pencil-simple"></i></button></span></div>`).join('')}
+        </section>` : ''}
+      </div>
+    </div>`;
+}
+
 function vGoals(){
   if(!S.goals.length){
     return `<section class="panel"><div class="empty" style="padding:56px 20px">
@@ -628,21 +799,21 @@ function vGoals(){
 
 /* ---------- 설정 ---------- */
 function vSettings(){
-  const f = S.budget.fixed;
+  const k = thisMonth(), bl = billsFor(k);
   return `<div class="grid g-2">
     <div>
       <section class="panel">
         <div class="p-head"><h2>월 예산</h2><button class="btn ghost" data-act="budget">수정</button></div>
         <div class="kv"><span>한 달 예산</span><b class="num">${won(S.budget.monthly)}원</b></div>
-        <div class="kv"><span>고정비 합계</span><b class="num">${won(fixedTotal())}원</b></div>
+        <div class="kv"><span>고정지출 · 할부 합계</span><b class="num">${won(fixedTotal())}원</b></div>
         <div class="kv"><span>자유 지출 여력</span><b class="num pos">${won(Math.max(0, S.budget.monthly - fixedTotal()))}원</b></div>
       </section>
       <section class="panel mt">
-        <div class="p-head"><h2>고정비</h2><button class="btn ghost" data-act="fixed-new"><i class="ph ph-plus"></i>추가</button></div>
-        ${f.length ? f.map(x => `<div class="kv"><span>${esc(x.name)}</span>
-            <span style="display:flex;gap:12px;align-items:center"><b class="num">${won(x.amount)}원</b>
-            <button data-fixed-del="${x.id}" style="color:var(--faint)" title="삭제"><i class="ph ph-x"></i></button></span></div>`).join('')
-          : `<div class="empty" style="padding:26px"><p style="margin:0">월세, 구독료처럼 매달 빠져나가는 돈을 등록하면 예산 여력 계산에 반영됩니다.</p></div>`}
+        <div class="p-head"><h2>고정지출 · 할부</h2><button class="btn ghost" data-tab-go="bills">관리 <i class="ph ph-arrow-right"></i></button></div>
+        ${bl.length ? `<div class="kv"><span>${monthName(k)} 납부 예정</span><b class="num">${won(billTotal(k))}원 <span style="color:var(--faint);font-weight:500">(${bl.length}건)</span></b></div>
+          <div class="kv"><span>아직 안 낸 금액</span><b class="num">${won(billsLeft(k).reduce((a,b) => a + b.amount, 0))}원</b></div>`
+          : `<div class="empty" style="padding:26px"><p style="margin:0">월세, 구독료, 할부금처럼 매달 정해진 날 빠져나가는 돈을 등록하면 예산 여력 계산에 반영되고 납부일을 놓치지 않습니다.</p>
+             <button class="btn line" data-act="bill-new" style="margin-top:12px"><i class="ph ph-plus"></i>납부 항목 추가</button></div>`}
       </section>
       <section class="panel mt">
         <div class="p-head"><h2>시작 잔액</h2><button class="btn ghost" data-act="start-bal">수정</button></div>
@@ -749,6 +920,7 @@ function mergeDocs(local, remote){
     txns: mergeList(older.txns, newer.txns).filter(t => !dead.has(t.id))
             .sort((a,b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0),
     goals: mergeList(older.goals, newer.goals),
+    bills: mergeList(older.bills, newer.bills).filter(b => !dead.has(b.id)),
     budget: newer.budget || older.budget,
     settings: newer.settings || older.settings,
     deleted: [...new Map([...(local.deleted||[]), ...(remote.deleted||[])].map(x => [x.id, x])).values()],
@@ -766,6 +938,7 @@ async function syncNow(manual){
       const merged = mergeDocs(S, remote);
       const changed = JSON.stringify(merged.txns) !== JSON.stringify(S.txns)
                    || JSON.stringify(merged.goals) !== JSON.stringify(S.goals)
+                   || JSON.stringify(merged.bills) !== JSON.stringify(S.bills)
                    || JSON.stringify(merged.budget) !== JSON.stringify(S.budget)
                    || JSON.stringify(merged.settings) !== JSON.stringify(S.settings);
       if(changed){
@@ -991,25 +1164,87 @@ function modalStartBalance(){
       });
     });
 }
-function modalFixed(){
-  const dId = 'fixed'; const d0 = draftLoad(dId);
-  openModal('고정비 추가', `
+function modalBill(existing){
+  const b = existing || null;
+  const dId = 'bill.' + (b ? b.id : 'new');
+  const d0 = draftLoad(dId);
+  let kind = d0?.kind || (b ? (b.months ? 'plan' : 'fixed') : 'fixed');
+  const nowM = thisMonth();
+  const day0 = d0?.day || b?.day || 25;
+  const cat0 = d0?.cat || b?.cat || 'home';
+  openModal(b ? '납부 항목 수정' : '납부 항목 추가', `
     ${draftNote(!!d0)}
-    <div class="field"><label for="fname">항목</label><input id="fname" type="text" placeholder="월세, 통신비, 구독료" value="${esc(d0?.name || '')}" autocomplete="off"></div>
+    <div class="seg" style="width:100%;margin-bottom:14px">
+      <button data-kind="fixed" aria-pressed="${kind==='fixed'}" style="flex:1">고정지출</button>
+      <button data-kind="plan" aria-pressed="${kind==='plan'}" style="flex:1">할부</button>
+    </div>
+    <div class="field"><label for="bname">항목</label>
+      <input id="bname" type="text" placeholder="월세, 통신비, 아이폰 할부" value="${esc(d0?.name ?? b?.name ?? '')}" autocomplete="off"></div>
     ${amountField('매달 나가는 금액','amt')}
-    <div class="foot"><button class="btn line" data-close>취소</button><button class="btn primary" id="submit">추가</button></div>`,
-    root => {
-      const amt = wireAmount(root, 'amt', d0?.amount);
-      setTimeout(() => root.querySelector('#fname').focus(), 60);
-      wireDraft(root, dId, () => draftSave(dId, { name: root.querySelector('#fname').value, amount: digits(amt.value) }));
-      root.querySelector('#draft-reset')?.addEventListener('click', () => { draftStop(root), draftClear(dId); closeModal(); modalFixed(); });
-      root.querySelector('#submit').addEventListener('click', () => {
-        const name = root.querySelector('#fname').value.trim(), v = digits(amt.value);
-        if(!name || !v) return toast('항목과 금액을 입력해 주세요');
-        S.budget.fixed.push({ id: uid(), name, amount: v }); draftStop(root), draftClear(dId); save(); closeModal(); render(); toast('고정비를 추가했습니다');
-      });
+    <div class="field row2">
+      <div><label for="bday">납부일</label>
+        <select id="bday">${Array.from({length:31},(_,i)=>i+1).map(n =>
+          `<option value="${n}" ${n===day0?'selected':''}>매달 ${n}일</option>`).join('')}</select></div>
+      <div><label for="bcat">분류</label>
+        <select id="bcat">${EXP_CATS.map(c =>
+          `<option value="${c.id}" ${c.id===cat0?'selected':''}>${c.name}</option>`).join('')}</select></div>
+    </div>
+    <div id="plan-body"></div>
+    <div class="foot">
+      ${b ? `<button class="btn danger" id="bdel">삭제</button>` : `<button class="btn line" data-close>취소</button>`}
+      <button class="btn primary" id="submit">${b ? '저장' : '추가'}</button>
+    </div>`, root => {
+    const amt = wireAmount(root, 'amt', d0?.amount || b?.amount);
+    setTimeout(() => root.querySelector('#bname').focus(), 60);
+    const planBody = root.querySelector('#plan-body');
+    const paint = () => {
+      planBody.innerHTML = kind === 'plan' ? `
+        <div class="field row2">
+          <div><label for="bmonths">총 회차</label>
+            <input id="bmonths" type="number" min="1" max="120" value="${d0?.months || b?.months || 12}"></div>
+          <div><label for="bstart">첫 납부 월</label>
+            <input id="bstart" type="month" value="${d0?.start || b?.start || nowM}"></div>
+        </div>
+        <div class="field"><div class="hint">회차를 다 채우면 목록에서 자동으로 빠집니다.</div></div>` : '';
+    };
+    paint();
+    const snap = () => draftSave(dId, {
+      kind, name: root.querySelector('#bname').value, amount: digits(amt.value),
+      day: Number(root.querySelector('#bday').value), cat: root.querySelector('#bcat').value,
+      months: Number(root.querySelector('#bmonths')?.value || 0),
+      start: root.querySelector('#bstart')?.value || '',
     });
+    wireDraft(root, dId, snap);
+    root.querySelector('#draft-reset')?.addEventListener('click', () => {
+      draftStop(root), draftClear(dId); closeModal(); modalBill(existing);
+    });
+    root.querySelectorAll('[data-kind]').forEach(x => x.addEventListener('click', () => {
+      kind = x.dataset.kind;
+      root.querySelectorAll('[data-kind]').forEach(y => y.setAttribute('aria-pressed', String(y.dataset.kind === kind)));
+      paint(); snap();
+    }));
+    root.querySelector('#submit').addEventListener('click', () => {
+      const name = root.querySelector('#bname').value.trim(), v = digits(amt.value);
+      if(!name || !v) return toast('항목과 금액을 입력해 주세요');
+      const months = kind === 'plan' ? Math.max(1, Number(root.querySelector('#bmonths').value) || 1) : 0;
+      const start = kind === 'plan' ? (root.querySelector('#bstart').value || nowM) : (b?.start || nowM);
+      const data = { name, amount: v, day: Number(root.querySelector('#bday').value),
+        cat: root.querySelector('#bcat').value, months, start };
+      if(b) Object.assign(b, data);
+      else S.bills.push(Object.assign({ id: uid(), paid: {} }, data));
+      draftStop(root), draftClear(dId);
+      save(); closeModal(); tab = 'bills'; render();
+      toast(b ? '수정했습니다' : '납부 항목을 추가했습니다');
+    });
+    root.querySelector('#bdel')?.addEventListener('click', () => {
+      if(!confirm(`"${b.name}"을(를) 목록에서 지울까요? 이미 납부로 기록한 거래는 그대로 남습니다.`)) return;
+      S.bills = S.bills.filter(x => x.id !== b.id); tombstone(b.id);
+      draftStop(root), draftClear(dId);
+      save(); closeModal(); render(); toast('삭제했습니다');
+    });
+  });
 }
+
 function modalGoal(g){
   const d = new Date(); d.setMonth(d.getMonth()+12);
   const dId = 'goal.' + (g ? g.id : 'new'); const d0 = draftLoad(dId);
@@ -1191,7 +1426,7 @@ function toast(msg){
 
 /* ---------- 이벤트 ---------- */
 document.addEventListener('click', e => {
-  const t = e.target.closest('[data-tab],[data-tab-go],[data-act],[data-del],[data-edit],[data-goal-save],[data-goal-edit],[data-fixed-del],[data-ftype],[data-rank],[data-months]');
+  const t = e.target.closest('[data-tab],[data-tab-go],[data-act],[data-del],[data-edit],[data-goal-save],[data-goal-edit],[data-bill-pay],[data-bill-unpay],[data-bill-edit],[data-snap],[data-ftype],[data-rank],[data-months]');
   if(!t) return;
   if(t.dataset.tab){ tab = t.dataset.tab; return render(); }
   if(t.dataset.tabGo){ tab = t.dataset.tabGo; return render(); }
@@ -1208,7 +1443,9 @@ document.addEventListener('click', e => {
     }
     return;
   }
-  if(t.dataset.fixedDel){ S.budget.fixed = S.budget.fixed.filter(x => x.id !== t.dataset.fixedDel); save(); return render(); }
+  if(t.dataset.billPay) return payBill(t.dataset.billPay, thisMonth());
+  if(t.dataset.billUnpay) return unpayBill(t.dataset.billUnpay, thisMonth());
+  if(t.dataset.billEdit) return modalBill(S.bills.find(x => x.id === t.dataset.billEdit));
   if(t.dataset.del){
     const tx = S.txns.find(x => x.id === t.dataset.del);
     if(tx && confirm(`${won(tx.amount)}원 기록을 삭제할까요?`)){ S.txns = S.txns.filter(x => x.id !== tx.id); tombstone(tx.id); save(); render(); }
@@ -1226,7 +1463,7 @@ document.addEventListener('click', e => {
     case 'recover-dismiss': recoverOffer = null; return render();
     case 'budget': return modalBudget();
     case 'start-bal': return modalStartBalance();
-    case 'fixed-new': return modalFixed();
+    case 'bill-new': return modalBill(null);
     case 'goal-new': return modalGoal(null);
     case 'export': return exportJSON();
     case 'export-csv': return exportCSV();
@@ -1266,7 +1503,7 @@ document.addEventListener('keydown', e => {
     if(tab !== 'txns'){ tab = 'txns'; render(); }
     return document.getElementById('f-q')?.focus();
   }
-  const map = { '1':'dash','2':'txns','3':'stats','4':'goals','5':'settings' };
+  const map = { '1':'dash','2':'txns','3':'stats','4':'bills','5':'goals','6':'settings' };
   if(map[e.key]){ tab = map[e.key]; render(); }
 });
 

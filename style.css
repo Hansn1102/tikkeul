@@ -273,3 +273,35 @@ kbd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;backg
 
 /* 패널 헤더 오른쪽 도구 묶음 */
 .head-tools{display:flex;align-items:center;gap:10px}
+
+/* 납부 예정: 고정지출 · 할부 */
+.kpis.k-3{grid-template-columns:repeat(3,1fr)}
+@media (max-width:900px){.kpis.k-3{grid-template-columns:1fr}.kpis.k-3 .kpi{border-left:0;border-top:1px solid var(--line-soft)}.kpis.k-3 .kpi:first-child{border-top:0}}
+.bills{display:flex;flex-direction:column}
+.bill{display:flex;align-items:center;gap:12px;padding:12px 18px;border-bottom:1px solid var(--line-soft)}
+.bill:last-child{border-bottom:0}
+.bill.paid{opacity:.55}
+.bday{
+  flex:none;width:38px;height:38px;border-radius:var(--r-sm);
+  background:var(--surface-2);display:grid;place-content:center;justify-items:center;line-height:1;
+}
+.bday b{font-size:14px;font-weight:700}
+.bday i{font-style:normal;font-size:10px;color:var(--faint);margin-top:2px}
+.bill.late .bday{background:var(--danger-soft);color:var(--danger)}
+.bill.today .bday{background:var(--accent-soft);color:var(--accent)}
+.binfo{flex:1;min-width:0}
+.bname{font-size:13.5px;font-weight:600;display:flex;align-items:center;gap:7px}
+.bterm{font-size:11px;font-weight:600;color:var(--accent);background:var(--accent-soft);border-radius:99px;padding:2px 7px}
+.bmeta{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--faint);margin-top:3px}
+.btag{font-weight:650}
+.btag.due{color:var(--muted)}
+.btag.today{color:var(--accent)}
+.btag.late{color:var(--danger)}
+.btag.paid{color:var(--faint)}
+.bamt{flex:none;font-size:13.5px;font-weight:650}
+.bact{flex:none;display:flex;align-items:center;gap:8px}
+.bills.mini .bill{padding:9px 18px}
+.bills.mini .bday{width:30px;height:30px}
+.bills.mini .bday b{font-size:12px}
+.pbar{width:70px;height:5px;border-radius:99px;background:var(--surface-2);overflow:hidden;display:block}
+.pbar i{display:block;height:100%;background:var(--accent);border-radius:99px}
