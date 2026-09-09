@@ -812,6 +812,42 @@ function paintSyncChip(){
 const packCfg = c => btoa(unescape(encodeURIComponent(JSON.stringify(c))));
 const unpackCfg = s => JSON.parse(decodeURIComponent(escape(atob(s.trim()))));
 
+/* ---------- 입력 초안: 타이핑되는 즉시 저장 ---------- */
+const DRAFT = 'tikkeul.draft.';
+const DRAFT_TTL = 12 * 60 * 60 * 1000;   /* 12시간 지난 초안은 되살리지 않음 */
+function draftSave(id, v){
+  try{
+    /* 날짜처럼 기본값이 있는 칸만 채워진 상태는 초안으로 치지 않는다 */
+    const meaningful = ['amount','target','seed','name','memo'];
+    const has = meaningful.some(k => v[k] !== undefined && v[k] !== '' && v[k] !== 0 && v[k] != null);
+    if(!has) return draftClear(id);
+    localStorage.setItem(DRAFT + id, JSON.stringify({ at: Date.now(), v }));
+  }catch(e){}
+}
+function draftLoad(id){
+  try{
+    const d = JSON.parse(localStorage.getItem(DRAFT + id) || 'null');
+    if(!d) return null;
+    if(Date.now() - d.at > DRAFT_TTL){ draftClear(id); return null; }
+    return d.v;
+  }catch(e){ return null; }
+}
+function draftClear(id){ try{ localStorage.removeItem(DRAFT + id); }catch(e){} }
+function draftNote(restored){
+  return restored ? `<div class="draft-note" id="draft-note"><i class="ph ph-arrow-counter-clockwise"></i>
+    <span>저장하지 않고 닫았던 입력을 되살렸습니다.</span>
+    <button type="button" id="draft-reset">새로 쓰기</button></div>` : '';
+}
+/* 모달 안의 모든 입력에 초안 저장을 걸어 준다 */
+function draftStop(root){ if(root) root.dataset.draftOff = '1'; }
+function wireDraft(root, id, snap){
+  const fire = () => { if(root.dataset.draftOff) return; snap(); };
+  root.addEventListener('input', fire);
+  root.addEventListener('change', fire);
+  root.addEventListener('click', fire);   /* 금액 빠른 버튼 · 칩 선택 */
+  return fire;
+}
+
 /* ---------- 모달 ---------- */
 const modalRoot = document.getElementById('modal-root');
 function closeModal(){ modalRoot.innerHTML = ''; }
@@ -844,10 +880,13 @@ function wireAmount(root, id, init){
 /* 거래 추가 · 수정 */
 function modalTx(existing){
   const t = existing || null;
-  let type = t?.type || 'expense';
-  let cat = t?.cat || 'food';
-  let goalId = t?.goalId || (S.goals[0]?.id || null);
+  const dId = 'tx.' + (t ? t.id : 'new');
+  const d0 = draftLoad(dId);
+  let type = d0?.type || t?.type || 'expense';
+  let cat = d0?.cat || t?.cat || 'food';
+  let goalId = d0?.goalId || t?.goalId || (S.goals[0]?.id || null);
   openModal(t ? '거래 수정' : '새 거래', `
+    ${draftNote(!!d0)}
     <div class="seg" style="width:100%;margin-bottom:14px">
       ${[['expense','지출'],['income','수입'],['save','저축']].map(([v,l]) =>
         `<button data-type="${v}" aria-pressed="${type===v}" style="flex:1">${l}</button>`).join('')}
@@ -855,15 +894,25 @@ function modalTx(existing){
     ${amountField('금액','amt')}
     <div id="type-body"></div>
     <div class="field row2">
-      <div><label for="date">날짜</label><input id="date" type="date" value="${t?.date || today()}"></div>
-      <div><label for="memo">메모</label><input id="memo" type="text" placeholder="선택 입력" value="${esc(t?.memo || '')}" autocomplete="off"></div>
+      <div><label for="date">날짜</label><input id="date" type="date" value="${d0?.date || t?.date || today()}"></div>
+      <div><label for="memo">메모</label><input id="memo" type="text" placeholder="선택 입력" value="${esc(d0?.memo ?? t?.memo ?? '')}" autocomplete="off"></div>
     </div>
     <div class="foot">
       <button class="btn line" data-close>취소</button>
       <button class="btn primary" id="submit">${t ? '저장' : '기록'}</button>
     </div>`, root => {
-    const amt = wireAmount(root, 'amt', t?.amount);
+    const amt = wireAmount(root, 'amt', d0?.amount || t?.amount);
     const body = root.querySelector('#type-body');
+    const snap = () => draftSave(dId, {
+      type, cat, goalId,
+      amount: digits(amt.value),
+      date: root.querySelector('#date').value,
+      memo: root.querySelector('#memo').value,
+    });
+    wireDraft(root, dId, snap);
+    root.querySelector('#draft-reset')?.addEventListener('click', () => {
+      draftStop(root), draftClear(dId); closeModal(); modalTx(existing);
+    });
     const paint = () => {
       if(type === 'save'){
         body.innerHTML = S.goals.length
@@ -876,14 +925,14 @@ function modalTx(existing){
         body.innerHTML = `<div class="field"><label>분류</label><div class="chips">${list.map(c =>
           `<button type="button" class="chip" data-cat="${c.id}" aria-pressed="${c.id===cat}"><i class="ph ${c.icon}"></i>${c.name}</button>`).join('')}</div></div>`;
       }
-      body.querySelectorAll('[data-cat]').forEach(b => b.addEventListener('click', () => { cat = b.dataset.cat; paint(); }));
-      body.querySelectorAll('[data-goal]').forEach(b => b.addEventListener('click', () => { goalId = b.dataset.goal; paint(); }));
+      body.querySelectorAll('[data-cat]').forEach(b => b.addEventListener('click', () => { cat = b.dataset.cat; snap(); paint(); }));
+      body.querySelectorAll('[data-goal]').forEach(b => b.addEventListener('click', () => { goalId = b.dataset.goal; snap(); paint(); }));
     };
     paint();
     root.querySelectorAll('[data-type]').forEach(b => b.addEventListener('click', () => {
       type = b.dataset.type;
       root.querySelectorAll('[data-type]').forEach(x => x.setAttribute('aria-pressed', String(x.dataset.type === type)));
-      paint();
+      snap(); paint();
     }));
     const submit = () => {
       const v = digits(amt.value);
@@ -897,6 +946,7 @@ function modalTx(existing){
       };
       if(t) Object.assign(t, data);
       else S.txns.push(Object.assign({ id: uid() }, data));
+      draftStop(root), draftClear(dId);
       save(); closeModal(); render();
       toast(t ? '수정했습니다' : `${type==='income'?'수입':type==='save'?'저축':'지출'} ${won(v)}원 기록`);
     };
@@ -906,66 +956,84 @@ function modalTx(existing){
 }
 
 function modalBudget(){
-  openModal('월 예산', `${amountField('한 달 지출 예산','amt')}
+  const dId = 'budget'; const d0 = draftLoad(dId);
+  openModal('월 예산', `${draftNote(!!d0)}${amountField('한 달 지출 예산','amt')}
     <div class="field"><div class="hint">고정비를 등록해 두면 자유롭게 쓸 수 있는 여력을 따로 계산합니다.</div></div>
     <div class="foot"><button class="btn line" data-close>취소</button><button class="btn primary" id="submit">저장</button></div>`,
     root => {
-      const amt = wireAmount(root, 'amt', S.budget.monthly);
+      const amt = wireAmount(root, 'amt', d0?.amount || S.budget.monthly);
+      wireDraft(root, dId, () => draftSave(dId, { amount: digits(amt.value) }));
+      root.querySelector('#draft-reset')?.addEventListener('click', () => { draftStop(root), draftClear(dId); closeModal(); modalBudget(); });
       root.querySelector('#submit').addEventListener('click', () => {
-        S.budget.monthly = digits(amt.value); save(); closeModal(); render(); toast('예산을 저장했습니다');
+        S.budget.monthly = digits(amt.value); draftStop(root), draftClear(dId); save(); closeModal(); render(); toast('예산을 저장했습니다');
       });
     });
 }
 function modalStartBalance(){
-  openModal('시작 잔액', `${amountField('기록 시작 시점의 잔액','amt')}
+  const dId = 'startbal'; const d0 = draftLoad(dId);
+  openModal('시작 잔액', `${draftNote(!!d0)}${amountField('기록 시작 시점의 잔액','amt')}
     <div class="field"><div class="hint">통장과 현금을 합한 금액을 넣으면 현재 잔액이 실제와 맞춰집니다.</div></div>
     <div class="foot"><button class="btn line" data-close>취소</button><button class="btn primary" id="submit">저장</button></div>`,
     root => {
-      const amt = wireAmount(root, 'amt', S.settings.startBalance);
+      const amt = wireAmount(root, 'amt', d0?.amount || S.settings.startBalance);
+      wireDraft(root, dId, () => draftSave(dId, { amount: digits(amt.value) }));
+      root.querySelector('#draft-reset')?.addEventListener('click', () => { draftStop(root), draftClear(dId); closeModal(); modalStartBalance(); });
       root.querySelector('#submit').addEventListener('click', () => {
-        S.settings.startBalance = digits(amt.value); save(); closeModal(); render(); toast('저장했습니다');
+        S.settings.startBalance = digits(amt.value); draftStop(root), draftClear(dId); save(); closeModal(); render(); toast('저장했습니다');
       });
     });
 }
 function modalFixed(){
+  const dId = 'fixed'; const d0 = draftLoad(dId);
   openModal('고정비 추가', `
-    <div class="field"><label for="fname">항목</label><input id="fname" type="text" placeholder="월세, 통신비, 구독료" autocomplete="off"></div>
+    ${draftNote(!!d0)}
+    <div class="field"><label for="fname">항목</label><input id="fname" type="text" placeholder="월세, 통신비, 구독료" value="${esc(d0?.name || '')}" autocomplete="off"></div>
     ${amountField('매달 나가는 금액','amt')}
     <div class="foot"><button class="btn line" data-close>취소</button><button class="btn primary" id="submit">추가</button></div>`,
     root => {
-      const amt = wireAmount(root, 'amt');
+      const amt = wireAmount(root, 'amt', d0?.amount);
       setTimeout(() => root.querySelector('#fname').focus(), 60);
+      wireDraft(root, dId, () => draftSave(dId, { name: root.querySelector('#fname').value, amount: digits(amt.value) }));
+      root.querySelector('#draft-reset')?.addEventListener('click', () => { draftStop(root), draftClear(dId); closeModal(); modalFixed(); });
       root.querySelector('#submit').addEventListener('click', () => {
         const name = root.querySelector('#fname').value.trim(), v = digits(amt.value);
         if(!name || !v) return toast('항목과 금액을 입력해 주세요');
-        S.budget.fixed.push({ id: uid(), name, amount: v }); save(); closeModal(); render(); toast('고정비를 추가했습니다');
+        S.budget.fixed.push({ id: uid(), name, amount: v }); draftStop(root), draftClear(dId); save(); closeModal(); render(); toast('고정비를 추가했습니다');
       });
     });
 }
 function modalGoal(g){
   const d = new Date(); d.setMonth(d.getMonth()+12);
-  const defDue = g?.due || monthKey(d);
+  const dId = 'goal.' + (g ? g.id : 'new'); const d0 = draftLoad(dId);
+  const defDue = d0?.due || g?.due || monthKey(d);
   openModal(g ? '목표 수정' : '목돈 목표', `
-    <div class="field"><label for="gname">목표 이름</label><input id="gname" type="text" placeholder="비상금, 이사 자금, 전세 보증금" value="${esc(g?.name || '')}" autocomplete="off"></div>
+    ${draftNote(!!d0)}
+    <div class="field"><label for="gname">목표 이름</label><input id="gname" type="text" placeholder="비상금, 이사 자금, 전세 보증금" value="${esc(d0?.name ?? g?.name ?? '')}" autocomplete="off"></div>
     ${amountField('목표 금액','amt')}
     <div class="field row2">
       <div><label for="gdue">언제까지</label><input id="gdue" type="month" value="${defDue}"></div>
-      <div><label for="gseed">이미 모아둔 금액</label><input id="gseed" class="num" type="text" inputmode="numeric" placeholder="0" value="${g?.seed ? won(g.seed) : ''}" autocomplete="off"></div>
+      <div><label for="gseed">이미 모아둔 금액</label><input id="gseed" class="num" type="text" inputmode="numeric" placeholder="0" value="${(d0?.seed || g?.seed) ? won(d0?.seed || g.seed) : ''}" autocomplete="off"></div>
     </div>
     <div class="foot">
       ${g ? `<button class="btn danger" id="gdel">삭제</button>` : `<button class="btn line" data-close>취소</button>`}
       <button class="btn primary" id="submit">${g ? '저장' : '만들기'}</button>
     </div>`, root => {
-    const amt = wireAmount(root, 'amt', g?.target);
+    const amt = wireAmount(root, 'amt', d0?.target || g?.target);
     setTimeout(() => root.querySelector('#gname').focus(), 60);
     const seed = root.querySelector('#gseed');
     seed.addEventListener('input', () => { const n = digits(seed.value); seed.value = n ? won(n) : ''; });
+    wireDraft(root, dId, () => draftSave(dId, {
+      name: root.querySelector('#gname').value, target: digits(amt.value),
+      due: root.querySelector('#gdue').value, seed: digits(seed.value),
+    }));
+    root.querySelector('#draft-reset')?.addEventListener('click', () => { draftStop(root), draftClear(dId); closeModal(); modalGoal(g); });
     root.querySelector('#submit').addEventListener('click', () => {
       const target = digits(amt.value);
       if(!target) return toast('목표 금액을 입력해 주세요');
       const data = { name: root.querySelector('#gname').value.trim() || '목돈 목표', target,
         due: root.querySelector('#gdue').value, seed: digits(seed.value) };
       if(g) Object.assign(g, data); else S.goals.push(Object.assign({ id: uid() }, data));
+      draftStop(root), draftClear(dId);
       save(); closeModal(); tab = 'goals'; render(); toast(g ? '수정했습니다' : '목표를 만들었습니다');
     });
     root.querySelector('#gdel')?.addEventListener('click', () => {
@@ -977,16 +1045,19 @@ function modalGoal(g){
 function modalDeposit(gid){
   const g = S.goals.find(x => x.id === gid); if(!g) return;
   const rest = Math.max(0, g.target - goalSaved(g));
-  openModal(`${g.name} 저축`, `${amountField('저축할 금액','amt')}
+  const dId = 'deposit.' + gid; const d0 = draftLoad(dId);
+  openModal(`${g.name} 저축`, `${draftNote(!!d0)}${amountField('저축할 금액','amt')}
     <div class="field"><div class="hint">목표까지 ${won(rest)}원 남았습니다.</div></div>
-    <div class="field"><label for="date">날짜</label><input id="date" type="date" value="${today()}"></div>
+    <div class="field"><label for="date">날짜</label><input id="date" type="date" value="${d0?.date || today()}"></div>
     <div class="foot"><button class="btn line" data-close>취소</button><button class="btn primary" id="submit">기록</button></div>`,
     root => {
-      const amt = wireAmount(root, 'amt');
+      const amt = wireAmount(root, 'amt', d0?.amount);
+      wireDraft(root, dId, () => draftSave(dId, { amount: digits(amt.value), date: root.querySelector('#date').value }));
+      root.querySelector('#draft-reset')?.addEventListener('click', () => { draftStop(root), draftClear(dId); closeModal(); modalDeposit(gid); });
       root.querySelector('#submit').addEventListener('click', () => {
         const v = digits(amt.value); if(!v) return toast('금액을 입력해 주세요');
         S.txns.push({ id: uid(), date: root.querySelector('#date').value || today(), amount: v, type:'save', cat:'save', memo:'', goalId: gid });
-        save(); closeModal(); render(); toast(`${won(v)}원 저축했습니다`);
+        draftStop(root), draftClear(dId); save(); closeModal(); render(); toast(`${won(v)}원 저축했습니다`);
       });
     });
 }
