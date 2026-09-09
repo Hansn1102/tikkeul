@@ -325,7 +325,9 @@ function vDash(){
     const over = m.budgetLeft < 0;
     const perDay = over ? 0 : m.budgetLeft / daysLeftInMonth();
     return `<section class="panel">
-      <div class="p-head"><h2>${monthName(k)} 예산</h2><span class="sub">${daysLeftInMonth()}일 남음</span></div>
+      <div class="p-head"><h2>${monthName(k)} 예산</h2>
+        <span class="head-tools"><span class="sub">${daysLeftInMonth()}일 남음</span>
+        <button class="btn ghost" data-act="budget">수정</button></span></div>
       <div class="kv"><span>예산</span><b class="num">${won(m.budget)}원</b></div>
       <div class="kv"><span>지출</span><b class="num">${won(m.expense)}원 <span style="color:var(--faint);font-weight:500">(${used}%)</span></b></div>
       <div class="kv"><span>${over ? '초과' : '남은 예산'}</span><b class="num ${over?'neg':'pos'}">${won(m.budgetLeft)}원</b></div>
@@ -959,13 +961,19 @@ function modalBudget(){
   const dId = 'budget'; const d0 = draftLoad(dId);
   openModal('월 예산', `${draftNote(!!d0)}${amountField('한 달 지출 예산','amt')}
     <div class="field"><div class="hint">고정비를 등록해 두면 자유롭게 쓸 수 있는 여력을 따로 계산합니다.</div></div>
-    <div class="foot"><button class="btn line" data-close>취소</button><button class="btn primary" id="submit">저장</button></div>`,
+    <div class="foot">
+      ${S.budget.monthly ? `<button class="btn danger" id="bclear">예산 해제</button>` : `<button class="btn line" data-close>취소</button>`}
+      <button class="btn primary" id="submit">저장</button>
+    </div>`,
     root => {
       const amt = wireAmount(root, 'amt', d0?.amount || S.budget.monthly);
       wireDraft(root, dId, () => draftSave(dId, { amount: digits(amt.value) }));
       root.querySelector('#draft-reset')?.addEventListener('click', () => { draftStop(root), draftClear(dId); closeModal(); modalBudget(); });
       root.querySelector('#submit').addEventListener('click', () => {
         S.budget.monthly = digits(amt.value); draftStop(root), draftClear(dId); save(); closeModal(); render(); toast('예산을 저장했습니다');
+      });
+      root.querySelector('#bclear')?.addEventListener('click', () => {
+        S.budget.monthly = 0; draftStop(root), draftClear(dId); save(); closeModal(); render(); toast('예산을 해제했습니다');
       });
     });
 }

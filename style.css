@@ -270,3 +270,6 @@ kbd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;backg
   padding:2px 0;cursor:pointer;opacity:.85;
 }
 .draft-note button:hover{opacity:1}
+
+/* 패널 헤더 오른쪽 도구 묶음 */
+.head-tools{display:flex;align-items:center;gap:10px}
